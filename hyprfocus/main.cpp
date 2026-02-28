@@ -48,6 +48,7 @@ static void onFocusChange(PHLWINDOW window) {
     static const auto POPACITY = CConfigValue<Hyprlang::FLOAT>("plugin:hyprfocus:fade_opacity");
     static const auto PBOUNCE  = CConfigValue<Hyprlang::FLOAT>("plugin:hyprfocus:bounce_strength");
     static const auto PSLIDE   = CConfigValue<Hyprlang::FLOAT>("plugin:hyprfocus:slide_height");
+    static const auto PCOLOR   = CConfigValue<Hyprlang::INT>("plugin:hyprfocus:border_color");
     static const auto PMODE    = CConfigValue<std::string>("plugin:hyprfocus:mode");
     const auto        PIN      = g_pConfigManager->getAnimationPropertyConfig("hyprfocusIn");
     const auto        POUT     = g_pConfigManager->getAnimationPropertyConfig("hyprfocusOut");
@@ -109,6 +110,27 @@ static void onFocusChange(PHLWINDOW window) {
 
             w->m_realPosition->setCallbackOnEnd(nullptr);
         });
+    } else if (*PMODE == "border") {
+        const auto ORIGINAL = window->m_realBorderColor;
+
+        window->m_realBorderColor         = {*PCOLOR};
+        window->m_realBorderColorPrevious = ORIGINAL;
+
+        window->m_borderFadeAnimationProgress->setConfig(PIN);
+        window->m_borderFadeAnimationProgress->setValueAndWarp(0.f);
+        *window->m_borderFadeAnimationProgress = 1.f;
+
+        window->m_borderFadeAnimationProgress->setCallbackOnEnd([w = PHLWINDOWREF{window}, POUT, ORIGINAL](WP<CBaseAnimatedVariable> pav) {
+            if (!w)
+                return;
+            w->m_realBorderColor         = ORIGINAL;
+            w->m_realBorderColorPrevious = {*PCOLOR};
+
+            w->m_borderFadeAnimationProgress->setConfig(POUT);
+            w->m_borderFadeAnimationProgress->setValueAndWarp(0.f);
+            *w->m_borderFadeAnimationProgress = 1.f;
+            w->m_borderFadeAnimationProgress->setCallbackOnEnd(nullptr);
+        });
     }
 }
 
@@ -131,6 +153,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addConfigValue(PHANDLE, "plugin:hyprfocus:fade_opacity", Hyprlang::FLOAT{0.8F});
     HyprlandAPI::addConfigValue(PHANDLE, "plugin:hyprfocus:slide_height", Hyprlang::FLOAT{20.F});
     HyprlandAPI::addConfigValue(PHANDLE, "plugin:hyprfocus:bounce_strength", Hyprlang::FLOAT{0.95F});
+    HyprlandAPI::addConfigValue(PHANDLE, "plugin:hyprfocus:border_color", Hyprlang::INT{*configStringToInt("rgba(000000ee)")});
 
     // this will not be cleaned up after we are unloaded but it doesn't really matter,
     // as if we create this again it will just overwrite the old one.
