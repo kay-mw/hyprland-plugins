@@ -10,11 +10,16 @@
 #define private public
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/config/ConfigValue.hpp>
+#include <hyprland/src/config/shared/animation/AnimationTree.hpp>
 #include <hyprland/src/helpers/AnimatedVariable.hpp>
 #include <hyprland/src/managers/animation/AnimationManager.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/layout/LayoutManager.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
+#include <hyprland/src/config/values/types/BoolValue.hpp>
+#include <hyprland/src/config/values/types/GradientValue.hpp>
+#include <hyprland/src/config/values/types/FloatValue.hpp>
+#include <hyprland/src/config/values/types/StringValue.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #undef private
 
@@ -24,6 +29,13 @@
 #include <hyprutils/animation/BezierCurve.hpp>
 using namespace Hyprutils::String;
 using namespace Hyprutils::Animation;
+
+static struct {
+    SP<Config::Values::CBoolValue>     onlyOnMonitorChange;
+    SP<Config::Values::CFloatValue>    fadeOpacity, slideHeight, bounceStrength;
+    SP<Config::Values::CStringValue>   mode;
+    SP<Config::Values::CGradientValue> borderColor;
+} configValues;
 
 // Do NOT change this function.
 APICALL EXPORT std::string PLUGIN_API_VERSION() {
@@ -39,40 +51,33 @@ static void onFocusChange(PHLWINDOW window) {
     if (lastWindow == window)
         return;
 
-    static const auto PONLY_ON_MONITOR_CHANGE = CConfigValue<Hyprlang::INT>("plugin:hyprfocus:only_on_monitor_change");
-    if (*PONLY_ON_MONITOR_CHANGE && lastWindow && lastWindow->m_monitor == window->m_monitor)
+    if (configValues.onlyOnMonitorChange->value() && lastWindow && lastWindow->m_monitor == window->m_monitor)
         return;
 
-    lastWindow = window;
+    lastWindow      = window;
+    const auto PIN  = Config::animationTree()->getAnimationPropertyConfig("hyprfocusIn");
+    const auto POUT = Config::animationTree()->getAnimationPropertyConfig("hyprfocusOut");
 
-    static const auto POPACITY = CConfigValue<Hyprlang::FLOAT>("plugin:hyprfocus:fade_opacity");
-    static const auto PBOUNCE  = CConfigValue<Hyprlang::FLOAT>("plugin:hyprfocus:bounce_strength");
-    static const auto PSLIDE   = CConfigValue<Hyprlang::FLOAT>("plugin:hyprfocus:slide_height");
-    static const auto PCOLOR   = CConfigValue<Hyprlang::INT>("plugin:hyprfocus:border_color");
-    static const auto PMODE    = CConfigValue<std::string>("plugin:hyprfocus:mode");
-    const auto        PIN      = g_pConfigManager->getAnimationPropertyConfig("hyprfocusIn");
-    const auto        POUT     = g_pConfigManager->getAnimationPropertyConfig("hyprfocusOut");
+    if (configValues.mode->value() == "flash") {
+        const auto ORIGINAL = window->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)->goal();
+        window->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)->setConfig(PIN);
+        *window->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE) = configValues.fadeOpacity->value();
 
-    if (*PMODE == "flash") {
-        const auto ORIGINAL = window->m_activeInactiveAlpha->goal();
-        window->m_activeInactiveAlpha->setConfig(PIN);
-        *window->m_activeInactiveAlpha = std::clamp(*POPACITY, 0.F, 1.F);
-
-        window->m_activeInactiveAlpha->setCallbackOnEnd([w = PHLWINDOWREF{window}, POUT, ORIGINAL](WP<CBaseAnimatedVariable> pav) {
+        window->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)->setCallbackOnEnd([w = PHLWINDOWREF{window}, POUT, ORIGINAL](WP<CBaseAnimatedVariable> pav) {
             if (!w)
                 return;
-            w->m_activeInactiveAlpha->setConfig(POUT);
-            *w->m_activeInactiveAlpha = ORIGINAL;
+            w->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)->setConfig(POUT);
+            *w->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE) = ORIGINAL;
 
-            w->m_activeInactiveAlpha->setCallbackOnEnd(nullptr);
+            w->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)->setCallbackOnEnd(nullptr);
         });
-    } else if (*PMODE == "bounce") {
+    } else if (configValues.mode->value() == "bounce") {
         const auto ORIGINAL = CBox{window->m_realPosition->goal(), window->m_realSize->goal()};
 
         window->m_realPosition->setConfig(PIN);
         window->m_realSize->setConfig(PIN);
 
-        auto box = ORIGINAL.copy().scaleFromCenter(std::clamp(*PBOUNCE, 0.1F, 1.F));
+        auto box = ORIGINAL.copy().scaleFromCenter(configValues.bounceStrength->value());
 
         *window->m_realPosition = box.pos();
         *window->m_realSize     = box.size();
@@ -91,12 +96,12 @@ static void onFocusChange(PHLWINDOW window) {
 
             w->m_realSize->setCallbackOnEnd(nullptr);
         });
-    } else if (*PMODE == "slide") {
+    } else if (configValues.mode->value() == "slide") {
         const auto ORIGINAL = window->m_realPosition->goal();
 
         window->m_realPosition->setConfig(PIN);
 
-        *window->m_realPosition = ORIGINAL - Vector2D{0.F, std::clamp(*PSLIDE, 0.F, 150.F)};
+        *window->m_realPosition = ORIGINAL - Vector2D{0.F, configValues.slideHeight->value()};
 
         window->m_realPosition->setCallbackOnEnd([w = PHLWINDOWREF{window}, POUT, ORIGINAL](WP<CBaseAnimatedVariable> pav) {
             if (!w)
@@ -110,10 +115,10 @@ static void onFocusChange(PHLWINDOW window) {
 
             w->m_realPosition->setCallbackOnEnd(nullptr);
         });
-    } else if (*PMODE == "border") {
+    } else if (configValues.mode->value() == "border") {
         const auto ORIGINAL = window->m_realBorderColor;
 
-        window->m_realBorderColor         = {*PCOLOR};
+        window->m_realBorderColor         = configValues.borderColor->value();
         window->m_realBorderColorPrevious = ORIGINAL;
 
         window->m_borderFadeAnimationProgress->setConfig(PIN);
@@ -124,7 +129,7 @@ static void onFocusChange(PHLWINDOW window) {
             if (!w)
                 return;
             w->m_realBorderColor         = ORIGINAL;
-            w->m_realBorderColorPrevious = {*PCOLOR};
+            w->m_realBorderColorPrevious = configValues.borderColor->value();
 
             w->m_borderFadeAnimationProgress->setConfig(POUT);
             w->m_borderFadeAnimationProgress->setValueAndWarp(0.f);
@@ -148,17 +153,28 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     static auto P = Event::bus()->m_events.window.active.listen([&](PHLWINDOW w, Desktop::eFocusReason r) { onFocusChange(w); });
 
-    HyprlandAPI::addConfigValue(PHANDLE, "plugin:hyprfocus:mode", Hyprlang::STRING{"flash"});
-    HyprlandAPI::addConfigValue(PHANDLE, "plugin:hyprfocus:only_on_monitor_change", Hyprlang::INT{0});
-    HyprlandAPI::addConfigValue(PHANDLE, "plugin:hyprfocus:fade_opacity", Hyprlang::FLOAT{0.8F});
-    HyprlandAPI::addConfigValue(PHANDLE, "plugin:hyprfocus:slide_height", Hyprlang::FLOAT{20.F});
-    HyprlandAPI::addConfigValue(PHANDLE, "plugin:hyprfocus:bounce_strength", Hyprlang::FLOAT{0.95F});
-    HyprlandAPI::addConfigValue(PHANDLE, "plugin:hyprfocus:border_color", Hyprlang::INT{*configStringToInt("rgba(000000ee)")});
+    configValues.mode = makeShared<Config::Values::CStringValue>("plugin:hyprfocus:mode", "mode to use", "flash");
+    configValues.onlyOnMonitorChange =
+        makeShared<Config::Values::CBoolValue>("plugin:hyprfocus:only_on_monitor_change", "whether to fire the animation only on monitor change", false);
+    configValues.fadeOpacity =
+        makeShared<Config::Values::CFloatValue>("plugin:hyprfocus:fade_opacity", "fade opacity", 0.8F, Config::Values::SFloatValueOptions{.min = 0.F, .max = 1.F});
+    configValues.slideHeight =
+        makeShared<Config::Values::CFloatValue>("plugin:hyprfocus:slide_height", "slide height", 20.F, Config::Values::SFloatValueOptions{.min = 0.F, .max = 150.F});
+    configValues.bounceStrength =
+        makeShared<Config::Values::CFloatValue>("plugin:hyprfocus:bounce_strength", "bounce strength", 0.95F, Config::Values::SFloatValueOptions{.min = 0.F, .max = 1.F});
+    configValues.borderColor = makeShared<Config::Values::CGradientValue>("plugin:hyprfocus:border_color", "border color", CHyprColor{0x66ffff00});
+
+    HyprlandAPI::addConfigValueV2(PHANDLE, configValues.mode);
+    HyprlandAPI::addConfigValueV2(PHANDLE, configValues.onlyOnMonitorChange);
+    HyprlandAPI::addConfigValueV2(PHANDLE, configValues.fadeOpacity);
+    HyprlandAPI::addConfigValueV2(PHANDLE, configValues.slideHeight);
+    HyprlandAPI::addConfigValueV2(PHANDLE, configValues.bounceStrength);
+    HyprlandAPI::addConfigValueV2(PHANDLE, configValues.borderColor);
 
     // this will not be cleaned up after we are unloaded but it doesn't really matter,
     // as if we create this again it will just overwrite the old one.
-    g_pConfigManager->m_animationTree.createNode("hyprfocusIn", "windowsIn");
-    g_pConfigManager->m_animationTree.createNode("hyprfocusOut", "windowsOut");
+    Config::animationTree()->m_animationTree.createNode("hyprfocusIn", "windowsIn");
+    Config::animationTree()->m_animationTree.createNode("hyprfocusOut", "windowsOut");
 
     return {"hyprfocus", "Flashfocus for Hyprland", "Vaxry", "1.0"};
 }
@@ -171,6 +187,6 @@ APICALL EXPORT void PLUGIN_EXIT() {
 
         w->m_realSize->setCallbackOnEnd(nullptr);
         w->m_realPosition->setCallbackOnEnd(nullptr);
-        w->m_activeInactiveAlpha->setCallbackOnEnd(nullptr);
+        w->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)->setCallbackOnEnd(nullptr);
     }
 }

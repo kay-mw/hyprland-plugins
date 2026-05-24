@@ -34,6 +34,7 @@ plugin {
 `col.text` | color | bar's title text color
 `bar_title_enabled` | bool | whether to render the title | `true`
 `bar_text_size` | int | bar's title text font size | `10`
+`bar_text_weight` | font weight | bar's title text weight. Named (`thin`, `light`, `normal`, `medium`, `semibold`, `bold`, `ultrabold`, `heavy`, ...) or integer 100-1000 | `400`
 `bar_text_font` | str | bar's title text font | `Sans`
 `bar_text_align` | left, center | bar's title text alignment | `center`
 `bar_buttons_alignment` | right, left | bar's buttons alignment | `right`
@@ -55,6 +56,36 @@ hyprbars-button = bgcolor, size, icon, on-click, fgcolor
 
 Please note it _has_ to be inside `plugin { hyprbars { } }`.
 
+For Lua config, use `hl.config` for plugin options and
+`hl.plugin.hyprbars.add_button` for buttons:
+
+```lua
+hl.config({
+    plugin = {
+        hyprbars = {
+            bar_height = 20,
+            on_double_click = "hyprctl dispatch fullscreen 1",
+        },
+    },
+})
+
+hl.plugin.hyprbars.add_button({
+    bg_color = "rgb(ff4040)",
+    fg_color = "rgb(ffffff)",
+    size = 10,
+    icon = "X",
+    action = "hyprctl dispatch killactive",
+})
+
+hl.plugin.hyprbars.add_button({
+    bg_color = "rgb(eeee11)",
+    fg_color = "rgb(000000)",
+    size = 10,
+    icon = "_",
+    action = "hyprctl dispatch fullscreen 1",
+})
+```
+
 ## Window rules
 
 Hyprbars supports the following _dynamic_ [window rules](https://wiki.hypr.land/Configuring/Window-Rules/):
@@ -66,5 +97,9 @@ Hyprbars supports the following _dynamic_ [window rules](https://wiki.hypr.land/
 Example:
 ```bash
 # Sets the bar color in red for all windows that have 'myClass' as a class
-windowrule = plugin:hyprbars:bar_color rgb(ff0000), class:^(myClass)
+windowrule {
+    name = myClass-red-bars
+    match:class = ^(myClass)$
+    hyprbars:bar_color = rgb(ff0000)
+}
 ```
