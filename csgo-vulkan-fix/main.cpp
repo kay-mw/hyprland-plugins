@@ -4,6 +4,7 @@
 
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
+#include <hyprland/src/desktop/state/WindowQuery.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/xwayland/XSurface.hpp>
@@ -19,9 +20,6 @@ extern "C" {
 #include <lua.h>
 #include <lauxlib.h>
 }
-
-#include <hyprutils/string/ConstVarList.hpp>
-using namespace Hyprutils::String;
 
 // Methods
 inline CFunctionHook* g_pMouseMotionHook     = nullptr;
@@ -80,7 +78,8 @@ void hkSetWindowSize(CXWaylandSurface* surface, const CBox& box) {
     }
 
     const auto SURF    = surface->m_surface.lock();
-    const auto PWINDOW = g_pCompositor->getWindowFromSurface(SURF);
+    const auto CWLSURF = Desktop::View::CWLSurface::fromResource(SURF);
+    const auto PWINDOW = CWLSURF ? Desktop::View::CWindow::fromView(CWLSURF->view()) : nullptr;
 
     CBox       newBox = box;
 
@@ -176,39 +175,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     static auto P = Event::bus()->m_events.config.preReload.listen([&] { g_appConfigs.clear(); });
 
-    if (Config::mgr()->type() == Config::CONFIG_LEGACY) {
-        HyprlandAPI::addConfigKeyword(
-            PHANDLE, "vkfix-app",
-            [](const char* l, const char* r) -> Hyprlang::CParseResult {
-                const std::string      str = r;
-                CConstVarList          data(str, 0, ',', true);
-
-                Hyprlang::CParseResult result;
-
-                if (data.size() != 3) {
-                    result.setError("vkfix-app requires 3 params");
-                    return result;
-                }
-
-                try {
-                    SAppConfig config;
-                    config.szClass = data[0];
-                    config.res     = Vector2D{std::stoi(std::string{data[1]}), std::stoi(std::string{data[2]})};
-                    g_appConfigs.emplace_back(std::move(config));
-                } catch (std::exception& e) {
-                    result.setError("failed to parse line");
-                    return result;
-                }
-
-                return result;
-            },
-            Hyprlang::SHandlerOptions{});
-    } else if (Config::mgr()->type() == Config::CONFIG_LUA) {
-        HyprlandAPI::addLuaFunction(PHANDLE, "csgo_vulkan_fix", "vkfix_app", ::vkfixAppLua);
-    } else {
-        HyprlandAPI::addNotification(PHANDLE, "[csgo-vulkan-fix] Failure in initialization: Failed to get a valid config manager", CHyprColor{1.0, 0.2, 0.2, 1.0}, 5000);
-        throw std::runtime_error("[vkfix] Config manager bad");
-    }
+    HyprlandAPI::addLuaFunction(PHANDLE, "csgo_vulkan_fix", "vkfix_app", ::vkfixAppLua);
 
     configValues.fixMouse =
         makeShared<Config::Values::CBoolValue>("plugin:csgo_vulkan_fix:fix_mouse", "Whether to fix the mouse position. A select few apps might be wonky with this.", true);
