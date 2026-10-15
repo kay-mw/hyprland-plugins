@@ -7,7 +7,7 @@ project(hyprfocus
 
 set(CMAKE_CXX_STANDARD 23)
 
-file(GLOB_RECURSE SRC "*.cpp")
+set(SRC main.cpp)
 
 add_library(hyprfocus SHARED ${SRC})
 

@@ -24,6 +24,8 @@
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
+#include <hyprland/src/render/decorations/CHyprBorderDecoration.hpp>
 #undef private
 
 #include "globals.hpp"
@@ -34,14 +36,15 @@ using namespace Hyprutils::String;
 using namespace Hyprutils::Animation;
 
 static struct {
-    SP<Config::Values::CBoolValue>     enable;
-    SP<Config::Values::CBoolValue>     animateFloating;
-    SP<Config::Values::CBoolValue>     onlyOnMonitorChange;
-    SP<Config::Values::CStringValue>   keyboardFocusAnimation;
-    SP<Config::Values::CStringValue>   mouseFocusAnimation;
-    SP<Config::Values::CFloatValue>    fadeOpacity;
-    SP<Config::Values::CFloatValue>    shrinkPercentage;
-    SP<Config::Values::CFloatValue>    slideHeight;
+    SP<Config::Values::CBoolValue>   enable;
+    SP<Config::Values::CBoolValue>   animateFloating;
+    SP<Config::Values::CBoolValue>   onlyOnMonitorChange;
+    SP<Config::Values::CStringValue> keyboardFocusAnimation;
+    SP<Config::Values::CStringValue> mouseFocusAnimation;
+    SP<Config::Values::CStringValue> groupFocusAnimation;
+    SP<Config::Values::CFloatValue>  fadeOpacity;
+    SP<Config::Values::CFloatValue>  shrinkPercentage;
+    SP<Config::Values::CFloatValue>  slideHeight;
     SP<Config::Values::CGradientValue> borderColor;
 } configValues;
 
@@ -54,6 +57,14 @@ static bool isMouseReason(Desktop::eFocusReason r) {
     return r == Desktop::FOCUS_REASON_CLICK || r == Desktop::FOCUS_REASON_FFM;
 }
 
+static bool isGroupReason(Desktop::eFocusReason r) {
+    return r == Desktop::FOCUS_REASON_GROUP_CURRENT_WINDOW_CHANGE;
+}
+
+static CHyprBorderDecoration* borderDecoration(PHLWINDOW window) {
+    return static_cast<CHyprBorderDecoration*>(window->presentation().decoration(DECORATION_BORDER).get());
+}
+
 static void onFocusChange(PHLWINDOW window, Desktop::eFocusReason reason) {
     if (!window)
         return;
@@ -61,7 +72,7 @@ static void onFocusChange(PHLWINDOW window, Desktop::eFocusReason reason) {
     if (!configValues.enable->value())
         return;
 
-    if (!configValues.animateFloating->value() && window->m_isFloating)
+    if (!configValues.animateFloating->value() && window->isFloating())
         return;
 
     static PHLWINDOWREF lastWindow;
@@ -74,7 +85,9 @@ static void onFocusChange(PHLWINDOW window, Desktop::eFocusReason reason) {
 
     lastWindow = window;
 
-    const auto mode = isMouseReason(reason) ? configValues.mouseFocusAnimation->value() : configValues.keyboardFocusAnimation->value();
+    const auto mode = isGroupReason(reason) ? configValues.groupFocusAnimation->value()
+        : isMouseReason(reason)             ? configValues.mouseFocusAnimation->value()
+                                             : configValues.keyboardFocusAnimation->value();
 
     if (mode == "none")
         return;
@@ -83,82 +96,98 @@ static void onFocusChange(PHLWINDOW window, Desktop::eFocusReason reason) {
     const auto POUT = Config::animationTree()->getAnimationPropertyConfig("hyprfocusOut");
 
     if (mode == "flash") {
-        const auto ORIGINAL = window->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)->goal();
-        window->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)->setConfig(PIN);
-        *window->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE) = configValues.fadeOpacity->value();
+        const auto ORIGINAL = window->alpha()[Desktop::View::WINDOW_ALPHA_ACTIVE]->goal();
+        window->alpha()[Desktop::View::WINDOW_ALPHA_ACTIVE]->setConfig(PIN);
+        *window->alpha()[Desktop::View::WINDOW_ALPHA_ACTIVE] = configValues.fadeOpacity->value();
 
-        window->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)->setCallbackOnEnd([w = PHLWINDOWREF{window}, POUT, ORIGINAL](WP<CBaseAnimatedVariable> pav) {
+        window->alpha()[Desktop::View::WINDOW_ALPHA_ACTIVE]->setCallbackOnEnd([w = PHLWINDOWREF{window}, POUT, ORIGINAL](WP<CBaseAnimatedVariable> pav) {
             if (!w)
                 return;
-            w->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)->setConfig(POUT);
-            *w->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE) = ORIGINAL;
+            w->alpha()[Desktop::View::WINDOW_ALPHA_ACTIVE]->setConfig(POUT);
+            *w->alpha()[Desktop::View::WINDOW_ALPHA_ACTIVE] = ORIGINAL;
 
-            w->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)->setCallbackOnEnd(nullptr);
+            w->alpha()[Desktop::View::WINDOW_ALPHA_ACTIVE]->setCallbackOnEnd(nullptr);
         });
     } else if (mode == "shrink") {
-        const auto ORIGINAL = CBox{window->positionAnimation()->goal(), window->sizeAnimation()->goal()};
-
-        window->positionAnimation()->setConfig(PIN);
-        window->sizeAnimation()->setConfig(PIN);
-
-        auto box = ORIGINAL.copy().scaleFromCenter(configValues.shrinkPercentage->value());
-
-        *window->positionAnimation() = box.pos();
-        *window->sizeAnimation()     = box.size();
-
-        window->sizeAnimation()->setCallbackOnEnd([w = PHLWINDOWREF{window}, POUT, ORIGINAL](WP<CBaseAnimatedVariable> pav) {
+        g_pEventLoopManager->doLater([w = PHLWINDOWREF{window}, PIN, POUT, PERCENT = configValues.shrinkPercentage->value()] {
             if (!w)
                 return;
-            w->sizeAnimation()->setConfig(POUT);
-            w->positionAnimation()->setConfig(POUT);
 
-            if (w->m_isFloating || Fullscreen::controller()->isFullscreen(w.lock())) {
-                *w->positionAnimation() = ORIGINAL.pos();
-                *w->sizeAnimation()     = ORIGINAL.size();
-            } else
-                w->layoutTarget()->recalc();
+            const auto ORIGINAL = CBox{w->positionAnimation()->goal(), w->sizeAnimation()->goal()};
 
-            w->sizeAnimation()->setCallbackOnEnd(nullptr);
+            w->positionAnimation()->setConfig(PIN);
+            w->sizeAnimation()->setConfig(PIN);
+
+            auto box = ORIGINAL.copy().scaleFromCenter(PERCENT);
+
+            *w->positionAnimation() = box.pos();
+            *w->sizeAnimation()     = box.size();
+
+            w->sizeAnimation()->setCallbackOnEnd([w, POUT, ORIGINAL](WP<CBaseAnimatedVariable> pav) {
+                if (!w)
+                    return;
+                w->sizeAnimation()->setConfig(POUT);
+                w->positionAnimation()->setConfig(POUT);
+
+                if (w->isFloating() || Fullscreen::controller()->isFullscreen(w.lock())) {
+                    *w->positionAnimation() = ORIGINAL.pos();
+                    *w->sizeAnimation()     = ORIGINAL.size();
+                } else
+                    w->layoutTarget()->recalc();
+
+                w->sizeAnimation()->setCallbackOnEnd(nullptr);
+            });
         });
     } else if (mode == "slide") {
-        const auto ORIGINAL = window->positionAnimation()->goal();
-
-        window->positionAnimation()->setConfig(PIN);
-
-        *window->positionAnimation() = ORIGINAL - Vector2D{0.F, configValues.slideHeight->value()};
-
-        window->positionAnimation()->setCallbackOnEnd([w = PHLWINDOWREF{window}, POUT, ORIGINAL](WP<CBaseAnimatedVariable> pav) {
+        g_pEventLoopManager->doLater([w = PHLWINDOWREF{window}, PIN, POUT, HEIGHT = configValues.slideHeight->value()] {
             if (!w)
                 return;
-            w->positionAnimation()->setConfig(POUT);
 
-            if (w->m_isFloating || Fullscreen::controller()->isFullscreen(w.lock()))
-                *w->positionAnimation() = ORIGINAL;
-            else
-                w->layoutTarget()->recalc();
+            const auto ORIGINAL = w->positionAnimation()->goal();
 
-            w->positionAnimation()->setCallbackOnEnd(nullptr);
+            w->positionAnimation()->setConfig(PIN);
+
+            *w->positionAnimation() = ORIGINAL - Vector2D{0.F, HEIGHT};
+
+            w->positionAnimation()->setCallbackOnEnd([w, POUT, ORIGINAL](WP<CBaseAnimatedVariable> pav) {
+                if (!w)
+                    return;
+                w->positionAnimation()->setConfig(POUT);
+
+                if (w->isFloating() || Fullscreen::controller()->isFullscreen(w.lock()))
+                    *w->positionAnimation() = ORIGINAL;
+                else
+                    w->layoutTarget()->recalc();
+
+                w->positionAnimation()->setCallbackOnEnd(nullptr);
+            });
         });
     } else if (mode == "border") {
-        const auto ORIGINAL = window->m_realBorderColor;
+        const auto border = borderDecoration(window);
+        if (!border)
+            return;
+        const auto ORIGINAL = border->m_gradient.m_current;
 
-        window->m_realBorderColor         = configValues.borderColor->value();
-        window->m_realBorderColorPrevious = ORIGINAL;
+        border->m_gradient.m_current         = configValues.borderColor->value();
+        border->m_gradient.m_previous = ORIGINAL;
 
-        window->m_borderFadeAnimationProgress->setConfig(PIN);
-        window->m_borderFadeAnimationProgress->setValueAndWarp(0.f);
-        *window->m_borderFadeAnimationProgress = 1.f;
+        border->m_gradient.m_fadeProgress->setConfig(PIN);
+        border->m_gradient.m_fadeProgress->setValueAndWarp(0.f);
+        *border->m_gradient.m_fadeProgress = 1.f;
 
-        window->m_borderFadeAnimationProgress->setCallbackOnEnd([w = PHLWINDOWREF{window}, POUT, ORIGINAL](WP<CBaseAnimatedVariable> pav) {
+        border->m_gradient.m_fadeProgress->setCallbackOnEnd([w = PHLWINDOWREF{window}, POUT, ORIGINAL](WP<CBaseAnimatedVariable> pav) {
             if (!w)
                 return;
-            w->m_realBorderColor         = ORIGINAL;
-            w->m_realBorderColorPrevious = configValues.borderColor->value();
+            const auto border = borderDecoration(w.lock());
+            if (!border)
+                return;
+            border->m_gradient.m_current         = ORIGINAL;
+            border->m_gradient.m_previous = configValues.borderColor->value();
 
-            w->m_borderFadeAnimationProgress->setConfig(POUT);
-            w->m_borderFadeAnimationProgress->setValueAndWarp(0.f);
-            *w->m_borderFadeAnimationProgress = 1.f;
-            w->m_borderFadeAnimationProgress->setCallbackOnEnd(nullptr);
+            border->m_gradient.m_fadeProgress->setConfig(POUT);
+            border->m_gradient.m_fadeProgress->setValueAndWarp(0.f);
+            *border->m_gradient.m_fadeProgress = 1.f;
+            border->m_gradient.m_fadeProgress->setCallbackOnEnd(nullptr);
         });
     }
 }
@@ -177,18 +206,16 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     static auto P = Event::bus()->m_events.window.active.listen([&](PHLWINDOW w, Desktop::eFocusReason r) { onFocusChange(w, r); });
 
-    configValues.enable          = makeShared<Config::Values::CBoolValue>("plugin:hyprfocus:enable", "enable or disable the plugin", true);
+    configValues.enable = makeShared<Config::Values::CBoolValue>("plugin:hyprfocus:enable", "enable or disable the plugin", true);
     configValues.animateFloating = makeShared<Config::Values::CBoolValue>("plugin:hyprfocus:animate_floating", "animate floating windows", true);
-    configValues.onlyOnMonitorChange =
-        makeShared<Config::Values::CBoolValue>("plugin:hyprfocus:only_on_monitor_change", "whether to fire the animation only on monitor change", false);
+    configValues.onlyOnMonitorChange = makeShared<Config::Values::CBoolValue>("plugin:hyprfocus:only_on_monitor_change", "whether to fire the animation only on monitor change", false);
     configValues.keyboardFocusAnimation = makeShared<Config::Values::CStringValue>("plugin:hyprfocus:keyboard_focus_animation", "animation for keyboard focus changes", "flash");
-    configValues.mouseFocusAnimation    = makeShared<Config::Values::CStringValue>("plugin:hyprfocus:mouse_focus_animation", "animation for mouse focus changes", "none");
-    configValues.fadeOpacity =
-        makeShared<Config::Values::CFloatValue>("plugin:hyprfocus:fade_opacity", "fade opacity", 0.8F, Config::Values::SFloatValueOptions{.min = 0.F, .max = 1.F});
-    configValues.shrinkPercentage =
-        makeShared<Config::Values::CFloatValue>("plugin:hyprfocus:shrink_percentage", "shrink percentage", 0.95F, Config::Values::SFloatValueOptions{.min = 0.F, .max = 1.F});
-    configValues.slideHeight =
-        makeShared<Config::Values::CFloatValue>("plugin:hyprfocus:slide_height", "slide height", 20.F, Config::Values::SFloatValueOptions{.min = 0.F, .max = 150.F});
+    configValues.mouseFocusAnimation = makeShared<Config::Values::CStringValue>("plugin:hyprfocus:mouse_focus_animation", "animation for mouse focus changes", "none");
+    configValues.groupFocusAnimation = makeShared<Config::Values::CStringValue>("plugin:hyprfocus:group_focus_animation", "animation for group active-window changes", "none");
+    configValues.fadeOpacity = makeShared<Config::Values::CFloatValue>("plugin:hyprfocus:fade_opacity", "fade opacity", 0.8F, Config::Values::SFloatValueOptions{.min = 0.F, .max = 1.F});
+    configValues.shrinkPercentage = makeShared<Config::Values::CFloatValue>("plugin:hyprfocus:shrink_percentage", "shrink percentage", 0.95F, Config::Values::SFloatValueOptions{.min = 0.F, .max = 1.F});
+    configValues.slideHeight = makeShared<Config::Values::CFloatValue>("plugin:hyprfocus:slide_height", "slide height", 20.F, Config::Values::SFloatValueOptions{.min = 0.F, .max = 150.F});
+
     configValues.borderColor = makeShared<Config::Values::CGradientValue>("plugin:hyprfocus:border_color", "border color", CHyprColor{0x66ffff00});
 
     HyprlandAPI::addConfigValueV2(PHANDLE, configValues.enable);
@@ -196,6 +223,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addConfigValueV2(PHANDLE, configValues.onlyOnMonitorChange);
     HyprlandAPI::addConfigValueV2(PHANDLE, configValues.keyboardFocusAnimation);
     HyprlandAPI::addConfigValueV2(PHANDLE, configValues.mouseFocusAnimation);
+    HyprlandAPI::addConfigValueV2(PHANDLE, configValues.groupFocusAnimation);
     HyprlandAPI::addConfigValueV2(PHANDLE, configValues.fadeOpacity);
     HyprlandAPI::addConfigValueV2(PHANDLE, configValues.shrinkPercentage);
     HyprlandAPI::addConfigValueV2(PHANDLE, configValues.slideHeight);
@@ -217,6 +245,8 @@ APICALL EXPORT void PLUGIN_EXIT() {
 
         w->sizeAnimation()->setCallbackOnEnd(nullptr);
         w->positionAnimation()->setCallbackOnEnd(nullptr);
-        w->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)->setCallbackOnEnd(nullptr);
+        w->alpha()[Desktop::View::WINDOW_ALPHA_ACTIVE]->setCallbackOnEnd(nullptr);
+        if (const auto border = borderDecoration(w))
+            border->m_gradient.m_fadeProgress->setCallbackOnEnd(nullptr);
     }
 }
